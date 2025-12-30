@@ -79,6 +79,7 @@ class FrozenLake(Environment):
         # start (&), frozen (.), hole (#), goal ($)
         self.lake = np.array(lake)
         self.lake_flat = self.lake.reshape(-1)
+        self.n_rows, self.n_columns = self.lake.shape
         
         self.slip = slip
         
@@ -101,11 +102,31 @@ class FrozenLake(Environment):
         
         return state, reward, done
         
-    def p(self, next_state, state, action):
-        # TODO:
+    def p(self, next_state, state, action): #environemnt model transition probabilities
+        
+        if state == self.absorbing_state:
+            return 1.0 if next_state == self.absorbing_state else 0.0
+        
+        if self.lake_flat[state] in ['#', '$']:
+            return 1.0 if next_state == self.absorbing_state else 0.0
+        
+        probability = 0.0
+        intended = self._move(state, action)
+        if next_state == intended:
+            probability += 1.0 - self.slip
+
+        for a in range(self.n_actions):
+            slipped = self._move(state, a)
+            if next_state == slipped:
+                probability += self.slip / self.n_actions
+
+        return probability  # return the computed probability
+        
     
     def r(self, next_state, state, action):
-        # TODO:
+        if state != self.absorbing_state and self.lake_flat[state] == '$':
+            return 1.0
+        return 0.0
    
     def render(self, policy=None, value=None):
         if policy is None:
