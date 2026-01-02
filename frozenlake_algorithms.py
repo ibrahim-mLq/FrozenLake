@@ -172,24 +172,65 @@ def play(env):
 def policy_evaluation(env, policy, gamma, theta, max_iterations):
     value = np.zeros(env.n_states, dtype=np.float)
 
-    # TODO:
+    for _ in range(max_iterations):
+        delta = 0.0
 
+        for s in range(env.n_states):
+            a = policy[s]
+            v_old = value[s]
+
+            v_new = 0.0
+            for sp in range(env.n_states):
+                p = env.p(sp, s, a)
+                if p > 0:
+                    r = env.r(sp, s, a)
+                    v_new += p * (r + gamma * value[sp])
+
+            value[s] = v_new
+            delta = max(delta, abs(v_old - v_new))
+
+            if delta < theta:
+                break
     return value
     
 def policy_improvement(env, value, gamma):
     policy = np.zeros(env.n_states, dtype=int)
     
-    # TODO:
+    for s in range(env.n_states):
+        best_value = -np.inf
+        best_action = 0
+        
+        for a in range(env.n_actions):
+            q_sa = 0.0
+            for sp in range(env.n_states):
+                p = env.p(sp, s, a)
+                if p > 0:
+                    r = env.r(sp, s ,a)
+                    q_sa += p * (r + gamma * value[sp])
+
+            if q_sa > best_value:
+                best_action = a
+                best_value = q_sa
+
+        policy[s] = best_action
 
     return policy
     
 def policy_iteration(env, gamma, theta, max_iterations, policy=None):
+
     if policy is None:
         policy = np.zeros(env.n_states, dtype=int)
     else:
         policy = np.array(policy, dtype=int)
     
-    # TODO:
+    for _ in range(max_iterations): 
+        value = policy_evaluation(env, policy, gamma, theta, max_iterations) # policy eval
+
+        new_policy = policy_improvement(env, value, gamma) #policy improvement
+
+        if np.array_equal(policy, new_policy): #does it convereg
+            break
+        policy = new_policy
         
     return policy, value
     
@@ -199,7 +240,46 @@ def value_iteration(env, gamma, theta, max_iterations, value=None):
     else:
         value = np.array(value, dtype=np.float)
     
-    # TODO:
+    for _ in range(max_iterations):
+        delta = 0.0
+
+        for s in range(env.n_states):
+            v_old = value[s]
+            
+            vest = -np.inf
+            for a in range(env.n_actions):
+                q_sa = 0.0
+                for sp in range(env.n_states):
+                    p = env.p(sp, s, a)
+                    if p > 0:
+                        r = env.r(sp, s, a)
+                        q_sa += p * (r + gamma * value[sp])
+                best = max(best, q_sa)
+
+            value[s] = best
+            delta = max(delta, abs(v_old - best))
+
+            if delta < theta:
+                break
+
+    policy = np.zeros(env.n_states, dtype=int)
+    for s in range(env.n_states):
+        best_action = 0
+        best_value = -np.inf
+
+        for a in range(env.n_actions):
+            q_sa = 0.0
+            for sp in range(env.n_states):
+                p = env.p(sp, s, a)
+                if p > 0:
+                    r = env.r(sp, s, a)
+                    q_sa += p * (r + gamma * value[sp])
+
+            if q_sa > best_value:
+                best_action = a
+                best_value = q_sa
+                
+        policy[s] = best_action
 
     return policy, value
 
@@ -411,50 +491,51 @@ class ReplayBuffer:
 
     def draw(self, batch_size):
         # TODO:
+        return None
         
         
-def deep_q_network_learning(env, max_episodes, learning_rate, gamma, epsilon, 
-                            batch_size, target_update_frequency, buffer_size, 
-                            kernel_size, conv_out_channels, fc_out_features, seed):
-    random_state = np.random.RandomState(seed)
-    replay_buffer = ReplayBuffer(buffer_size, random_state)
+    def deep_q_network_learning(env, max_episodes, learning_rate, gamma, epsilon, 
+                                batch_size, target_update_frequency, buffer_size, 
+                                kernel_size, conv_out_channels, fc_out_features, seed):
+        random_state = np.random.RandomState(seed)
+        replay_buffer = ReplayBuffer(buffer_size, random_state)
 
-    dqn = DeepQNetwork(env, learning_rate, kernel_size, conv_out_channels, 
-                       fc_out_features, seed=seed)
-    tdqn = DeepQNetwork(env, learning_rate, kernel_size, conv_out_channels, 
+        dqn = DeepQNetwork(env, learning_rate, kernel_size, conv_out_channels, 
                         fc_out_features, seed=seed)
+        tdqn = DeepQNetwork(env, learning_rate, kernel_size, conv_out_channels, 
+                            fc_out_features, seed=seed)
 
-    epsilon = np.linspace(epsilon, 0, max_episodes)
+        epsilon = np.linspace(epsilon, 0, max_episodes)
 
-    for i in range(max_episodes):
-        state = env.reset()
+        for i in range(max_episodes):
+            state = env.reset()
 
-        done = False
-        while not done:
-            if random_state.rand() < epsilon[i]:
-                action = random_state.choice(env.n_actions)
-            else:
-                with torch.no_grad():
-                    q = dqn(np.array([state]))[0].numpy()
+            done = False
+            while not done:
+                if random_state.rand() < epsilon[i]:
+                    action = random_state.choice(env.n_actions)
+                else:
+                    with torch.no_grad():
+                        q = dqn(np.array([state]))[0].numpy()
 
-                qmax = max(q)
-                best = [a for a in range(env.n_actions) if np.allclose(qmax, q[a])]
-                action = random_state.choice(best)
+                    qmax = max(q)
+                    best = [a for a in range(env.n_actions) if np.allclose(qmax, q[a])]
+                    action = random_state.choice(best)
 
-            next_state, reward, done = env.step(action)
+                next_state, reward, done = env.step(action)
 
-            replay_buffer.append((state, action, reward, next_state, done))
+                replay_buffer.append((state, action, reward, next_state, done))
 
-            state = next_state
+                state = next_state
 
-            if len(replay_buffer) >= batch_size:
-                transitions = replay_buffer.draw(batch_size)
-                dqn.train_step(transitions, gamma, tdqn)
+                if len(replay_buffer) >= batch_size:
+                    transitions = replay_buffer.draw(batch_size)
+                    dqn.train_step(transitions, gamma, tdqn)
 
-        if (i % target_update_frequency) == 0:
-            tdqn.load_state_dict(dqn.state_dict())
+            if (i % target_update_frequency) == 0:
+                tdqn.load_state_dict(dqn.state_dict())
 
-    return dqn
+        return dqn
 
 def main():
     seed = 0
