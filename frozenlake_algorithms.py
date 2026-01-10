@@ -1,5 +1,8 @@
 import numpy as np
 import contextlib
+from collections import deque
+import torch
+
 
 # Configures numpy print options
 @contextlib.contextmanager
@@ -398,23 +401,29 @@ class FrozenLakeImageWrapper:
         self.n_actions = self.env.n_actions
         self.state_shape = (4, lake.shape[0], lake.shape[1])
 
+        # channels 2..4 are fixed maps: start, holes, goal
         lake_image = [(lake == c).astype(float) for c in ['&', '#', '$']]
 
-        self.state_image = {lake.absorbing_state: 
-                            np.stack([np.zeros(lake.shape)] + lake_image)}
+        # absorbing state: agent channel all zeros + fixed maps
+        self.state_image = {
+            self.env.absorbing_state: np.stack([np.zeros(lake.shape)] + lake_image)
+        }
+
+        # all normal states: agent channel is one-hot at the agent position
         for state in range(lake.size):
-            # TODO: 
+            agent_position = np.zeros(lake.shape)
+            row, col = state // lake.shape[1], state % lake.shape[1]
+            agent_position[row, col] = 1.0
+            self.state_image[state] = np.stack([agent_position] + lake_image)
 
     def encode_state(self, state):
         return self.state_image[state]
 
     def decode_policy(self, dqn):
         states = np.array([self.encode_state(s) for s in range(self.env.n_states)])
-        q = dqn(states).detach().numpy()  # torch.no_grad omitted to avoid import
-
+        q = dqn(states).detach().numpy()
         policy = q.argmax(axis=1)
         value = q.max(axis=1)
-
         return policy, value
 
     def reset(self):
@@ -422,60 +431,74 @@ class FrozenLakeImageWrapper:
 
     def step(self, action):
         state, reward, done = self.env.step(action)
-
         return self.encode_state(state), reward, done
 
     def render(self, policy=None, value=None):
         self.env.render(policy, value)
+
         
         
 class DeepQNetwork(torch.nn.Module):
-    def __init__(self, env, learning_rate, kernel_size, conv_out_channels, 
-                 fc_out_features, seed):
-        torch.nn.Module.__init__(self)
+    def __init__(self, env, learning_rate, kernel_size, conv_out_channels,
+                 fc_out_features, seed=0):
+        super().__init__()
         torch.manual_seed(seed)
 
-        self.conv_layer = torch.nn.Conv2d(in_channels=env.state_shape[0], 
-                                          out_channels=conv_out_channels,
-                                          kernel_size=kernel_size, stride=1)
+        self.conv_layer = torch.nn.Conv2d(
+            in_channels=env.state_shape[0],
+            out_channels=conv_out_channels,
+            kernel_size=kernel_size,
+            stride=1
+        )
 
         h = env.state_shape[1] - kernel_size + 1
         w = env.state_shape[2] - kernel_size + 1
 
-        self.fc_layer = torch.nn.Linear(in_features=h * w * conv_out_channels, 
-                                        out_features=fc_out_features)
-        self.output_layer = torch.nn.Linear(in_features=fc_out_features, 
-                                            out_features=env.n_actions)
+        self.fc_layer = torch.nn.Linear(
+            in_features=h * w * conv_out_channels,
+            out_features=fc_out_features
+        )
+        self.output_layer = torch.nn.Linear(
+            in_features=fc_out_features,
+            out_features=env.n_actions
+        )
 
         self.optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
 
     def forward(self, x):
-        x = torch.tensor(x, dtype=torch.float)
-        
-        # TODO: 
+        x = torch.tensor(x, dtype=torch.float32)   # (B, 4, h, w)
+        x = self.conv_layer(x)
+        x = torch.relu(x)
+        x = x.view(x.size(0), -1)                  # flatten
+        x = self.fc_layer(x)
+        x = torch.relu(x)
+        x = self.output_layer(x)                   # (B, |A|)
+        return x
 
     def train_step(self, transitions, gamma, tdqn):
-        states = np.array([transition[0] for transition in transitions])
-        actions = np.array([transition[1] for transition in transitions])
-        rewards = np.array([transition[2] for transition in transitions])
-        next_states = np.array([transition[3] for transition in transitions])
-        dones = np.array([transition[4] for transition in transitions])
+        states = np.array([t[0] for t in transitions])
+        actions = np.array([t[1] for t in transitions])
+        rewards = np.array([t[2] for t in transitions])
+        next_states = np.array([t[3] for t in transitions])
+        dones = np.array([t[4] for t in transitions])
 
         q = self(states)
-        q = q.gather(1, torch.Tensor(actions).view(len(transitions), 1).long())
+        q = q.gather(1, torch.tensor(actions).view(len(transitions), 1).long())
         q = q.view(len(transitions))
 
         with torch.no_grad():
-            next_q = tdqn(next_states).max(dim=1)[0] * (1 - dones)
+            next_q = tdqn(next_states).max(dim=1)[0]
+            target = (
+                torch.tensor(rewards, dtype=torch.float32)
+                + gamma * next_q * torch.tensor(1.0 - dones, dtype=torch.float32)
+            )
 
-        target = torch.Tensor(rewards) + gamma * next_q
-
-        # TODO: the loss is the mean squared error between `q` and `target`
-        loss = 0
+        loss = torch.nn.functional.mse_loss(q, target)
 
         self.optimizer.zero_grad()
         loss.backward()
-        self.optimizer.step()    
+        self.optimizer.step()
+
         
         
 class ReplayBuffer:
@@ -490,52 +513,64 @@ class ReplayBuffer:
         self.buffer.append(transition)
 
     def draw(self, batch_size):
-        # TODO:
-        return None
-        
-        
-    def deep_q_network_learning(env, max_episodes, learning_rate, gamma, epsilon, 
-                                batch_size, target_update_frequency, buffer_size, 
-                                kernel_size, conv_out_channels, fc_out_features, seed):
-        random_state = np.random.RandomState(seed)
-        replay_buffer = ReplayBuffer(buffer_size, random_state)
+        indices = self.random_state.choice(len(self.buffer), size=batch_size, replace=False)
+        return [self.buffer[i] for i in indices]
 
-        dqn = DeepQNetwork(env, learning_rate, kernel_size, conv_out_channels, 
+        
+        
+        
+def deep_q_network_learning(env, max_episodes, learning_rate, gamma, epsilon,
+                            batch_size, target_update_frequency, buffer_size,
+                            kernel_size, conv_out_channels, fc_out_features, seed=0):
+    random_state = np.random.RandomState(seed)
+    replay_buffer = ReplayBuffer(buffer_size, random_state)
+
+    dqn = DeepQNetwork(env, learning_rate, kernel_size, conv_out_channels,
+                       fc_out_features, seed=seed)
+    tdqn = DeepQNetwork(env, learning_rate, kernel_size, conv_out_channels,
                         fc_out_features, seed=seed)
-        tdqn = DeepQNetwork(env, learning_rate, kernel_size, conv_out_channels, 
-                            fc_out_features, seed=seed)
 
-        epsilon = np.linspace(epsilon, 0, max_episodes)
+    # Debug prints (kept as in your snippet)
+    print(f"DQN FC layer input features: {dqn.fc_layer.in_features}")
+    print(f"TDQN FC layer input features: {tdqn.fc_layer.in_features}")
+    print(f"Expected from kernel_size={kernel_size}: {(4 - kernel_size + 1) ** 2 * conv_out_channels}")
 
-        for i in range(max_episodes):
-            state = env.reset()
+    test_state = env.reset()
+    print(f"Test state shape: {test_state.shape}")
+    test_output = dqn(np.array([test_state]))
+    print(f"DQN output shape: {test_output.shape}")
 
-            done = False
-            while not done:
-                if random_state.rand() < epsilon[i]:
-                    action = random_state.choice(env.n_actions)
-                else:
-                    with torch.no_grad():
-                        q = dqn(np.array([state]))[0].numpy()
+    epsilon = np.linspace(epsilon, 0, max_episodes)
 
-                    qmax = max(q)
-                    best = [a for a in range(env.n_actions) if np.allclose(qmax, q[a])]
-                    action = random_state.choice(best)
+    for i in range(max_episodes):
+        state = env.reset()
+        done = False
 
-                next_state, reward, done = env.step(action)
+        while not done:
+            # epsilon-greedy with random tie-breaking
+            if random_state.rand() < epsilon[i]:
+                action = random_state.choice(env.n_actions)
+            else:
+                with torch.no_grad():
+                    q = dqn(np.array([state]))[0].numpy()
+                qmax = max(q)
+                best = [a for a in range(env.n_actions) if np.allclose(qmax, q[a])]
+                action = random_state.choice(best)
 
-                replay_buffer.append((state, action, reward, next_state, done))
+            next_state, reward, done = env.step(action)
 
-                state = next_state
+            replay_buffer.append((state, action, reward, next_state, done))
+            state = next_state
 
-                if len(replay_buffer) >= batch_size:
-                    transitions = replay_buffer.draw(batch_size)
-                    dqn.train_step(transitions, gamma, tdqn)
+            if len(replay_buffer) >= batch_size:
+                transitions = replay_buffer.draw(batch_size)
+                dqn.train_step(transitions, gamma, tdqn)
 
-            if (i % target_update_frequency) == 0:
-                tdqn.load_state_dict(dqn.state_dict())
+        if (i % target_update_frequency) == 0:
+            tdqn.load_state_dict(dqn.state_dict())
 
-        return dqn
+    return dqn
+
 
 def main():
     seed = 0
